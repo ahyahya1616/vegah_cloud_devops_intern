@@ -1,0 +1,131 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  REPO_NAME: ${{ github.repository }}
+
+jobs:
+  test:
+    name: Test & Validate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install Dependencies
+        run: |
+          cd backend
+          npm ci
+
+      - name: Run Backend Vitest Unit Tests
+        run: |
+          cd backend
+          npm test
+
+  build-and-push:
+    name: Build & Push Multi-Stage Images
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Commit SHA
+        id: vars
+        run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Set Image Names Lowercase
+        id: images
+        run: |
+          LOWER_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          echo "backend=${{ env.REGISTRY }}/${LOWER_REPO}/backend" >> $GITHUB_OUTPUT
+          echo "worker=${{ env.REGISTRY }}/${LOWER_REPO}/worker" >> $GITHUB_OUTPUT
+          echo "frontend=${{ env.REGISTRY }}/${LOWER_REPO}/frontend" >> $GITHUB_OUTPUT
+
+      # 1. Backend API
+      - name: Build & Push Backend API Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.api
+          push: true
+          tags: |
+            ${{ steps.images.outputs.backend }}:latest
+            ${{ steps.images.outputs.backend }}:${{ github.sha }}
+
+      # 2. Worker
+      - name: Build & Push Worker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile.worker
+          push: true
+          tags: |
+            ${{ steps.images.outputs.worker }}:latest
+            ${{ steps.images.outputs.worker }}:${{ github.sha }}
+
+      # 3. Frontend Next.js
+      - name: Build & Push Frontend Image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ steps.images.outputs.frontend }}:latest
+            ${{ steps.images.outputs.frontend }}:${{ github.sha }}
+
+  deploy:
+    name: Cloud Deployment to AWS EC2
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Deploy to Cloud VM via SSH
+        uses: appleboy/ssh-action@v1.0.3
+        if: "${{ env.EC2_HOST != '' }}"
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+        with:
+          host: ${{ secrets.EC2_HOST }}
+          username: ${{ secrets.EC2_USER || 'ubuntu' }}
+          key: ${{ secrets.EC2_SSH_KEY }}
+          envs: GITHUB_ACTOR,GITHUB_TOKEN,GITHUB_SHA
+          script: |
+            mkdir -p ~/app
+            cd ~/app
+            echo "${{ secrets.PROD_ENV_FILE }}" > .env
+            
+            LOWER_REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+            export IMAGE_BACKEND="ghcr.io/${LOWER_REPO}/backend:latest"
+            export IMAGE_WORKER="ghcr.io/${LOWER_REPO}/worker:latest"
+            export IMAGE_FRONTEND="ghcr.io/${LOWER_REPO}/frontend:latest"
+            
+            echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+            docker compose -f docker-compose.prod.yml pull
+            docker compose -f docker-compose.prod.yml up -d --remove-orphans

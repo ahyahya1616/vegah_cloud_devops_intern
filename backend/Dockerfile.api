@@ -1,0 +1,39 @@
+# Stage 1: Build NestJS API & Worker
+FROM node:22-alpine AS builder
+
+WORKDIR /app
+
+# Copy dependency definitions
+COPY package*.json ./
+RUN npm ci
+
+# Copy source and build
+COPY . .
+RUN npm run build
+
+# Stage 2: Production Runner
+FROM node:22-alpine AS runner
+
+WORKDIR /app
+
+ENV NODE_ENV=production
+
+# Install curl for docker healthcheck
+RUN apk add --no-cache curl
+
+# Only copy production dependencies and compiled dist
+COPY package*.json ./
+RUN npm ci --omit=dev
+
+COPY --from=builder /app/dist ./dist
+
+# Non-root user for security best practices
+USER node
+
+EXPOSE 4000
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:4000/health || exit 1
+
+CMD ["npm", "run", "start:prod"]
+
