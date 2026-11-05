@@ -141,3 +141,4 @@ Full-stack containerized distributed system with automated CI/CD pipeline, Redis
 | **1:00–1:40** | Show GitHub Actions CI/CD workflow executing tests, image builds, GHCR publishing, and deployment trigger. |
 | **1:40–2:20** | Live app demo: submit task from UI, watch BullMQ worker pick up job in real time, and show PostgreSQL status update to `COMPLETED`. |
 | **2:20–2:50** | Briefly address production questions: Docker restart policies, named persistent volumes, secrets injection, and rollback strategy. |
+
